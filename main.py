@@ -13,7 +13,7 @@ intents.message_content = True  # Required to read message content
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Replace with the actual user ID you want to DM
-TARGET_USER_ID = 287387174947520513
+TARGET_USER_ID = 1348784300753031269
 
 # Replace with the channel IDs you want to monitor
 TARGET_CHANNEL_IDS = {
