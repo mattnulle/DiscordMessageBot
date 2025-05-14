@@ -13,7 +13,7 @@ intents.message_content = True  # Required to read message content
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Replace with the actual user ID you want to DM
-TARGET_USER_ID = 1348784300753031269
+TARGET_USER_IDS = [1348784300753031269, 287387174947520513] 
 
 # Replace with the channel IDs you want to monitor
 TARGET_CHANNEL_IDS = {
@@ -35,11 +35,12 @@ async def on_message(message):
 
     # Only respond to messages in the target channels
     if message.channel.id in TARGET_CHANNEL_IDS:
-        target_user = await bot.fetch_user(TARGET_USER_ID)
-        if target_user:
-            await target_user.send(
-                f'New message in #{message.channel.name} by {message.author}:\n{message.content}'
-            )
+        for TARGET_USER_ID in TARGET_USER_IDS:
+            target_user = await bot.fetch_user(TARGET_USER_ID)
+            if target_user:
+                await target_user.send(
+                    f'New message in #{message.channel.name} by {message.author}:\n{message.content}'
+                )
 
     await bot.process_commands(message)  # Ensures other commands still work
 
