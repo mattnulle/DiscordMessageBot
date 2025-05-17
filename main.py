@@ -1,13 +1,16 @@
 import os
 import json
 import asyncio
+import re
 import discord
 from discord.ext import commands, tasks
 from flask import Flask
 from threading import Thread
 from pathlib import Path
 from datetime import datetime, timedelta
-import dateparser  # Make sure to install this: pip install dateparser
+import dateparser  # Install this: pip install dateparser
+
+# === DISCORD INTENTS & BOT SETUP ===
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -88,12 +91,11 @@ def save_scheduled_sessions():
 
 # === UTILITIES ===
 
-def parse_session_date(content):
+def parse_session_date(date_text):
     """
-    Parses a date from the string "next session: <date>"
+    Parses a natural-language date string and returns a datetime object
     """
     try:
-        date_text = content.split("next session:", 1)[1].strip()
         parsed_date = dateparser.parse(date_text)
         if parsed_date:
             return parsed_date
@@ -120,8 +122,10 @@ async def on_message(message):
 
     # Respond to DMs
     if isinstance(message.channel, discord.DMChannel):
-        if message.content.lower().startswith("next session:"):
-            session_date = parse_session_date(message.content)
+        match = re.match(r"^\s*next\s*session\s*:\s*(.+)", message.content, re.IGNORECASE)
+        if match:
+            date_str = match.group(1).strip()
+            session_date = parse_session_date(date_str)
             if session_date:
                 scheduled_time = session_date.replace(hour=8, minute=0, second=0, microsecond=0)
                 scheduled_sessions.append({
@@ -190,4 +194,3 @@ async def check_scheduled_sessions():
 
 keep_alive()
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
-
