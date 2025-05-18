@@ -9,6 +9,8 @@ from threading import Thread
 from pathlib import Path
 from datetime import datetime, timedelta
 import dateparser  # pip install dateparser
+import requests
+import discord
 
 # === DISCORD INTENTS & BOT SETUP ===
 
@@ -30,7 +32,7 @@ TARGET_CHANNEL_IDS = {
     1345189811962642504, 1341556002218315909
 }
 
-DEFAULT_ANNOUNCE_CHANNEL_ID = 1362245135492059290
+DEFAULT_ANNOUNCE_CHANNEL_ID = 1341556002218315909
 SESSION_ANNOUNCE_CHANNEL_ID = DEFAULT_ANNOUNCE_CHANNEL_ID
 SESSIONS_FILE = "sessions.json"
 
@@ -55,12 +57,14 @@ def keep_alive():
 # === PERSISTENCE ===
 
 def load_scheduled_sessions():
-    global SESSION_ANNOUNCE_CHANNEL_ID
+    global SESSION_ANNOUNCE_CHANNEL_ID, REGULAR_USER_IDS
+
     if Path(SESSIONS_FILE).exists():
         with open(SESSIONS_FILE, 'r') as f:
             data = json.load(f)
 
         SESSION_ANNOUNCE_CHANNEL_ID = data.get("announce_channel_id", DEFAULT_ANNOUNCE_CHANNEL_ID)
+        REGULAR_USER_IDS = set(data.get("regular_user_ids", list(REGULAR_USER_IDS)))
         raw_sessions = data.get("sessions", [])
         return [
             {
@@ -73,10 +77,11 @@ def load_scheduled_sessions():
     return []
 
 def save_scheduled_sessions():
-    global SESSION_ANNOUNCE_CHANNEL_ID
+    global SESSION_ANNOUNCE_CHANNEL_ID, REGULAR_USER_IDS
 
     data = {
         "announce_channel_id": SESSION_ANNOUNCE_CHANNEL_ID,
+        "regular_user_ids": list(REGULAR_USER_IDS),
         "sessions": [
             {
                 'time': item['time'].isoformat(),
@@ -87,6 +92,7 @@ def save_scheduled_sessions():
         ]
     }
     with open(SESSIONS_FILE, 'w') as f:
+        print(f"Writing data: {data}" )
         json.dump(data, f, indent=2)
 
 # === UTILITIES ===
@@ -100,6 +106,57 @@ def parse_session_date(date_text):
         print(f"Date parsing failed: {e}")
     return None
 
+async def lookup_term(message, term):
+    endpoints = [
+        'skills', 'spells', 'monsters', 'classes', 'races', 'feats',
+        'equipment', 'backgrounds', 'conditions', 'damage-types',
+        'languages', 'features', 'magic-items'
+    ]
+
+    search_term = term.lower().replace(' ', '-')
+    base_url = "https://www.dnd5eapi.co/api/2014/"
+
+    for endpoint in endpoints:
+        url = f"{base_url}/{endpoint}/{search_term}"
+        print(f"Trying request to: {url}")
+        response = requests.get(url)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # Title
+            name = data.get("name") or data.get("index", "Unknown")
+            embed = discord.Embed(
+                title=name,
+                url=url,
+                color=discord.Color.blurple()
+            )
+
+            # Description logic
+            if isinstance(data.get("desc"), list):
+                embed.description = "\n".join(data["desc"])[:2048]
+            elif isinstance(data.get("desc"), str):
+                embed.description = data["desc"][:2048]
+            elif isinstance(data.get("description"), list):
+                embed.description = "\n".join(data["description"])[:2048]
+            elif isinstance(data.get("description"), str):
+                embed.description = data["description"][:2048]
+            else:
+                embed.description = "No description available."
+
+            # Add some useful fields from the data
+            for key in ["level", "school", "type", "hit_points", "armor_class", "speed"]:
+                if key in data:
+                    value = data[key]
+                    if isinstance(value, dict):
+                        value = value.get("name", str(value))
+                    embed.add_field(name=key.replace("_", " ").title(), value=str(value), inline=True)
+
+            await message.channel.send(embed=embed)
+            return
+
+    await message.channel.send(f"❌ Could not find information for '{term}'. Please check the spelling or try another term.")
+
 # === EVENTS ===
 
 @bot.event
@@ -110,6 +167,126 @@ async def on_ready():
     send_alive_message.start()
     check_scheduled_sessions.start()
 
+async def handle_command(content, message):
+    global SESSION_ANNOUNCE_CHANNEL_ID
+
+    if content.lower() == "signup":
+        if message.author.id in REGULAR_USER_IDS:
+            await message.channel.send("You're already signed up.")
+        else:
+            REGULAR_USER_IDS.add(message.author.id)
+            save_scheduled_sessions()
+            await message.channel.send("You've been signed up to receive forwarded messages.")
+        return
+
+    elif content.lower() == "unsubscribe":
+        if message.author.id in REGULAR_USER_IDS:
+            REGULAR_USER_IDS.remove(message.author.id)
+            save_scheduled_sessions()
+            await message.channel.send("You've been unsubscribed from forwarded messages.")
+        else:
+            await message.channel.send("You're not currently subscribed.")
+        return
+
+    elif content.lower() in {"help", "usage"}:
+        help_text = (
+            "**Bot Commands:**\n"
+            "`next session: <date>` – Schedule a session reminder at 8AM on the given date.\n"
+            "`list sessions` – Show all upcoming scheduled sessions.\n"
+            "`cancel session <YYYY-MM-DD>` – Cancel any session scheduled on that date.\n"
+            "`signup` – Sign up to receive forwarded messages from monitored channels.\n"
+            "`unsubscribe` – Stop receiving forwarded messages.\n"
+            "`set announce channel <channel_id>` – Set the channel for session reminders (admin only).\n"
+            "`help` or `usage` – Show this message."
+        )
+        await message.channel.send(help_text)
+        return
+
+    elif content.lower().startswith("set announce channel"):
+        if message.author.id not in ADMIN_USER_IDS:
+            await message.channel.send("You don't have permission to do that.")
+            return
+
+        match = re.match(r"set announce channel\s+(\d+)", content, re.IGNORECASE)
+        if match:
+            new_channel_id = int(match.group(1))
+            channel = bot.get_channel(new_channel_id)
+            if channel:
+                global SESSION_ANNOUNCE_CHANNEL_ID
+                SESSION_ANNOUNCE_CHANNEL_ID = new_channel_id
+                save_scheduled_sessions()
+                await message.channel.send(
+                    f"Announcement channel updated to <#{new_channel_id}>"
+                )
+            else:
+                await message.channel.send("Invalid channel ID or I can't access that channel.")
+        else:
+            await message.channel.send("Usage: `set announce channel <channel_id>`")
+        return
+
+    elif content.lower().startswith("cancel session"):
+        match = re.match(r"cancel session\s+(\d{4}-\d{2}-\d{2})", content, re.IGNORECASE)
+        if match:
+            date_str = match.group(1)
+            try:
+                cancel_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                before_count = len(scheduled_sessions)
+                scheduled_sessions[:] = [
+                    s for s in scheduled_sessions
+                    if s['time'].date() != cancel_date
+                ]
+                removed = before_count - len(scheduled_sessions)
+                save_scheduled_sessions()
+                await message.channel.send(
+                    f"Cancelled {removed} session(s) on {cancel_date.strftime('%Y-%m-%d')}."
+                    if removed else f"No sessions found on {cancel_date.strftime('%Y-%m-%d')}."
+                )
+            except ValueError:
+                await message.channel.send("Invalid date format. Use YYYY-MM-DD.")
+        else:
+            await message.channel.send("Usage: `cancel session <YYYY-MM-DD>`")
+        return
+
+    elif content.lower() == "list sessions":
+        if not scheduled_sessions:
+            await message.channel.send("No sessions scheduled.")
+        else:
+            msg = "\n".join(
+                f"- {s['time'].strftime('%Y-%m-%d %H:%M')} by {s.get('added_by', 'unknown')} in <#{s['channel_id']}>"
+                for s in sorted(scheduled_sessions, key=lambda s: s['time'])
+            )
+            await message.channel.send(f"Scheduled sessions:\n{msg}")
+        return
+
+    if content.lower().startswith("lookup "):
+        term = content[7:].strip()
+        await lookup_term(message, term)
+        return
+
+    # Schedule a session
+    match = re.match(r"^\s*next\s*session\s*:\s*(.+)", content, re.IGNORECASE)
+    if match:
+        date_str = match.group(1).strip()
+        session_date = parse_session_date(date_str)
+        if session_date:
+            scheduled_time = session_date.replace(hour=8, minute=0, second=0, microsecond=0)
+            scheduled_sessions.append({
+                'time': scheduled_time,
+                'channel_id': SESSION_ANNOUNCE_CHANNEL_ID,
+                'added_by': str(message.author)
+            })
+            save_scheduled_sessions()
+            await message.channel.send(
+                f"Session scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M')}"
+            )
+        else:
+            await message.channel.send("Sorry, I couldn't understand the date.")
+        return
+
+    # Fallback
+    await message.channel.send("I'm alive")
+
+
 @bot.event
 async def on_message(message):
     global SESSION_ANNOUNCE_CHANNEL_ID
@@ -119,103 +296,17 @@ async def on_message(message):
     # Respond to DMs
     if isinstance(message.channel, discord.DMChannel):
         content = message.content.strip()
+        await handle_command(content, message)
+        return
 
-        # Add session
-        match = re.match(r"^\s*next\s*session\s*:\s*(.+)", content, re.IGNORECASE)
-        if match:
-            date_str = match.group(1).strip()
-            session_date = parse_session_date(date_str)
-            if session_date:
-                scheduled_time = session_date.replace(hour=8, minute=0, second=0, microsecond=0)
-                scheduled_sessions.append({
-                    'time': scheduled_time,
-                    'channel_id': SESSION_ANNOUNCE_CHANNEL_ID,
-                    'added_by': str(message.author)
-                })
-                save_scheduled_sessions()
-                await message.channel.send(
-                    f"Session scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M')}"
-                )
-            else:
-                await message.channel.send("Sorry, I couldn't understand the date.")
-            return
-
-        # List sessions
-        elif content.lower() == "list sessions":
-            if not scheduled_sessions:
-                await message.channel.send("No sessions scheduled.")
-            else:
-                msg = "\n".join(
-                    f"- {s['time'].strftime('%Y-%m-%d %H:%M')} by {s.get('added_by', 'unknown')} in <#{s['channel_id']}>"
-                    for s in sorted(scheduled_sessions, key=lambda s: s['time'])
-                )
-                await message.channel.send(f"Scheduled sessions:\n{msg}")
-            return
-
-        # Cancel session
-        elif content.lower().startswith("cancel session"):
-            match = re.match(r"cancel session\s+(\d{4}-\d{2}-\d{2})", content, re.IGNORECASE)
-            if match:
-                date_str = match.group(1)
-                try:
-                    cancel_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    before_count = len(scheduled_sessions)
-                    scheduled_sessions[:] = [
-                        s for s in scheduled_sessions
-                        if s['time'].date() != cancel_date
-                    ]
-                    removed = before_count - len(scheduled_sessions)
-                    save_scheduled_sessions()
-                    await message.channel.send(
-                        f"Cancelled {removed} session(s) on {cancel_date.strftime('%Y-%m-%d')}."
-                        if removed else f"No sessions found on {cancel_date.strftime('%Y-%m-%d')}."
-                    )
-                except ValueError:
-                    await message.channel.send("Invalid date format. Use YYYY-MM-DD.")
-            else:
-                await message.channel.send("Usage: `cancel session <YYYY-MM-DD>`")
-            return
-
-        # Change announcement channel
-        elif content.lower().startswith("set announce channel"):
-            if message.author.id not in ADMIN_USER_IDS:
-                await message.channel.send("You don't have permission to do that.")
-                return
-
-            match = re.match(r"set announce channel\s+(\d+)", content, re.IGNORECASE)
-            if match:
-                new_channel_id = int(match.group(1))
-                channel = bot.get_channel(new_channel_id)
-                if channel:
-                    SESSION_ANNOUNCE_CHANNEL_ID = new_channel_id
-                    save_scheduled_sessions()
-                    await message.channel.send(
-                        f"Announcement channel updated to <#{new_channel_id}>"
-                    )
-                else:
-                    await message.channel.send("Invalid channel ID or I can't access that channel.")
-            else:
-                await message.channel.send("Usage: `set announce channel <channel_id>`")
-            return
-
-        # Help / usage info
-        elif content.lower() in {"help", "usage"}:
-            help_text = (
-                "**Bot Commands:**\n"
-                "`next session: <date>` – Schedule a session at 8AM on the given date.\n"
-                "`list sessions` – Show all upcoming scheduled sessions.\n"
-                "`cancel session <YYYY-MM-DD>` – Cancel any session scheduled on that date.\n"
-                "`set announce channel <channel_id>` – Set the channel for session reminders (admin only).\n"
-                "`help` or `usage` – Show this message.\n"
-                "`any other message` – Bot replies with 'I'm alive'."
-            )
-            await message.channel.send(help_text)
-            return
-
-        # Default DM response
-        else:
-            await message.channel.send("I'm alive")
-            return
+    elif bot.user in message.mentions:
+        # Strip the mention from the message
+        content = re.sub(f"<@!?{bot.user.id}>", "", message.content).strip()
+        # Handle as a pseudo-DM
+        # Reuse the same logic as DM commands
+        # (we'll wrap the DM command logic in a helper)
+        await handle_command(content, message)
+        return
 
     # Forward messages from target channels
     if message.channel.id in TARGET_CHANNEL_IDS:
