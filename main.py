@@ -12,6 +12,10 @@ import dateparser  # pip install dateparser
 import requests
 import discord
 
+from lookup.data_loader import load_all_data
+from lookup.lookup import lookup_term
+from datetime import datetime
+
 # === DISCORD INTENTS & BOT SETUP ===
 
 intents = discord.Intents.default()
@@ -55,6 +59,13 @@ def keep_alive():
     t.start()
 
 # === PERSISTENCE ===
+
+def log_command(author, content, location):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] {author} in {location}: {content}"
+    print(log_line)
+    with open("command_log.txt", "a", encoding="utf-8") as f:
+        f.write(log_line + "\n")
 
 def load_scheduled_sessions():
     global SESSION_ANNOUNCE_CHANNEL_ID, REGULAR_USER_IDS
@@ -106,69 +117,25 @@ def parse_session_date(date_text):
         print(f"Date parsing failed: {e}")
     return None
 
-async def lookup_term(message, term):
-    endpoints = [
-        'skills', 'spells', 'monsters', 'classes', 'races', 'feats',
-        'equipment', 'backgrounds', 'conditions', 'damage-types',
-        'languages', 'features', 'magic-items'
-    ]
-
-    search_term = term.lower().replace(' ', '-')
-    base_url = "https://www.dnd5eapi.co/api/2014/"
-
-    for endpoint in endpoints:
-        url = f"{base_url}/{endpoint}/{search_term}"
-        print(f"Trying request to: {url}")
-        response = requests.get(url)
-
-        if response.status_code == 200:
-            data = response.json()
-
-            # Title
-            name = data.get("name") or data.get("index", "Unknown")
-            embed = discord.Embed(
-                title=name,
-                url=url,
-                color=discord.Color.blurple()
-            )
-
-            # Description logic
-            if isinstance(data.get("desc"), list):
-                embed.description = "\n".join(data["desc"])[:2048]
-            elif isinstance(data.get("desc"), str):
-                embed.description = data["desc"][:2048]
-            elif isinstance(data.get("description"), list):
-                embed.description = "\n".join(data["description"])[:2048]
-            elif isinstance(data.get("description"), str):
-                embed.description = data["description"][:2048]
-            else:
-                embed.description = "No description available."
-
-            # Add some useful fields from the data
-            for key in ["level", "school", "type", "hit_points", "armor_class", "speed"]:
-                if key in data:
-                    value = data[key]
-                    if isinstance(value, dict):
-                        value = value.get("name", str(value))
-                    embed.add_field(name=key.replace("_", " ").title(), value=str(value), inline=True)
-
-            await message.channel.send(embed=embed)
-            return
-
-    await message.channel.send(f"❌ Could not find information for '{term}'. Please check the spelling or try another term.")
-
 # === EVENTS ===
+
+
 
 @bot.event
 async def on_ready():
     global scheduled_sessions
     scheduled_sessions = load_scheduled_sessions()
+    load_all_data()
     print(f'Bot is ready. Logged in as {bot.user}')
     send_alive_message.start()
     check_scheduled_sessions.start()
 
 async def handle_command(content, message):
     global SESSION_ANNOUNCE_CHANNEL_ID
+    
+    # Log it
+    location = f"DM" if isinstance(message.channel, discord.DMChannel) else f"#{message.channel.name} ({message.guild.name})"
+    log_command(message.author, message.content, location)
 
     if content.lower() == "signup":
         if message.author.id in REGULAR_USER_IDS:
@@ -258,8 +225,8 @@ async def handle_command(content, message):
             await message.channel.send(f"Scheduled sessions:\n{msg}")
         return
 
-    if content.lower().startswith("lookup "):
-        term = content[7:].strip()
+    if message.content.lower().startswith("lookup "):
+        term = message.content[7:].strip()
         await lookup_term(message, term)
         return
 
@@ -285,6 +252,7 @@ async def handle_command(content, message):
 
     # Fallback
     await message.channel.send("I'm alive")
+
 
 
 @bot.event
